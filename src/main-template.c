@@ -74,11 +74,7 @@ void* tache_remplacement(void* arg) {
     return NULL;
 }
 
-// Tâche renard : patrouille périodique.
-// Spécification: toutes les FOX_TIME ms le renard pourrait voler une poule s'il est sur NORTH/SOUTH/EAST.
-// Pour empêcher le vol, on doit déclencher l'alarme AVANT l'expiration de la période si le renard est présent.
-// Implémentation: on scanne séquentiellement les côtés actifs (N,S,E) dans la même période jusqu'à DETECTED.
-// On ne teste pas AWAY (état inactif). Si aucune menace détectée, on libère la tâche de remplacement.
+// Tâche renard : patrouille périodique sur les côtés NORTH, SOUTH, EAST.
 void* tache_renard(void* arg) {
     struct timespec next_activation;
     clock_gettime(CLOCK_MONOTONIC, &next_activation);
@@ -118,7 +114,6 @@ void* tache_renard(void* arg) {
 }
 
 // Tâche aigle : unique côté ABOVE à surveiller chaque période EAGLE_TIME.
-// On évite choix AWAY pour garantir détection toujours avant vol.
 void* tache_aigle(void* arg) {
     struct timespec next_activation;
     clock_gettime(CLOCK_MONOTONIC, &next_activation);
