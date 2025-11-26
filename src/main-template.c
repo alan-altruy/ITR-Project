@@ -7,6 +7,10 @@
 #include <stdbool.h>
 #include <signal.h>
 #include <semaphore.h>
+#include <stdlib.h>
+
+// Prototype de la fonction utilitaire d'affichage des directions
+const char* dir_name(side_t d);
 
 // Variables globales
 coop_t *c;
@@ -70,37 +74,38 @@ void* tache_remplacement(void* arg) {
     return NULL;
 }
 
-// Tâche renard : patrouille périodique et déclenche l'alarme si menace détectée.
+// Tâche renard : patrouille périodique.
+// Spécification: toutes les FOX_TIME ms le renard pourrait voler une poule s'il est sur NORTH/SOUTH/EAST.
+// Pour empêcher le vol, on doit déclencher l'alarme AVANT l'expiration de la période si le renard est présent.
+// Implémentation: on scanne séquentiellement les côtés actifs (N,S,E) dans la même période jusqu'à DETECTED.
+// On ne teste pas AWAY (état inactif). Si aucune menace détectée, on libère la tâche de remplacement.
 void* tache_renard(void* arg) {
     struct timespec next_activation;
     clock_gettime(CLOCK_MONOTONIC, &next_activation);
     
-    // Directions à tester pour le renard
+    // Côtés actifs à surveiller (WEST est mur, AWAY = aucun vol)
     side_t directions_renard[] = {NORTH, SOUTH, EAST};
     int nb_directions = 3;
     
     while (!should_stop) {
-        printf("[RENARD] Patrouille démarrée\n");
-        
-        // Parcourir toutes les directions du renard
+        printf("[RENARD] Patrouille période FOX_TIME: scan des côtés actifs\n");
         bool menace_trouvee = false;
-        for (int i = 0; i < nb_directions; i++) {
-            error_t sense_error;
-            sense_t result = sense(sensors, directions_renard[i], &sense_error);
-            
+        for (int i = 0; i < nb_directions && !should_stop; ++i) {
+            side_t side = directions_renard[i];
+            error_t sense_error = OK;
+            sense_t result = sense(sensors, side, &sense_error);
             if (sense_error == OK && result == DETECTED) {
-                // Menace détectée, déclencher l'alarme
-                printf("[RENARD] Menace détectée à la direction %d! Alarme!\n", directions_renard[i]);
-                sound_alarm(sensors, directions_renard[i]);
+                printf("[RENARD] Menace DETECTED sur %s -> Alarme avant fin période\n", dir_name(side));
+                sound_alarm(sensors, side);
                 menace_trouvee = true;
-                break; // Menace trouvée et chassée, fin de cette période
+                break; // Menace neutralisée pour cette période
+            } else if (sense_error != OK) {
+                printf("[RENARD] Erreur sense (%d) sur %s\n", sense_error, dir_name(side));
             }
         }
-        
         if (!menace_trouvee) {
-            printf("[RENARD] Aucune menace détectée\n");
-            // Pas de menace = temps libre, libérer la tâche de remplacement
-            sem_post(&sem_replacement);
+            printf("[RENARD] Aucune menace détectée sur N/S/E cette période -> temps libre\n");
+            sem_post(&sem_replacement); // Une seule libération
         }
         
         // Attendre la prochaine période (FOX_TIME = 4000ms)
@@ -112,33 +117,27 @@ void* tache_renard(void* arg) {
     return NULL;
 }
 
-// Tâche aigle : patrouille périodique et déclenche l'alarme si menace détectée.
+// Tâche aigle : unique côté ABOVE à surveiller chaque période EAGLE_TIME.
+// On évite choix AWAY pour garantir détection toujours avant vol.
 void* tache_aigle(void* arg) {
     struct timespec next_activation;
     clock_gettime(CLOCK_MONOTONIC, &next_activation);
-    
     while (!should_stop) {
-        printf("[AIGLE] Patrouille démarrée\n");
-        
-        // Tester la direction de l'aigle (ABOVE uniquement)
-        error_t sense_error;
+        printf("[AIGLE] Patrouille ABOVE période EAGLE_TIME\n");
+        error_t sense_error = OK;
         sense_t result = sense(sensors, ABOVE, &sense_error);
-        
         if (sense_error == OK && result == DETECTED) {
-            // Menace détectée, déclencher l'alarme
-            printf("[AIGLE] Menace détectée en haut! Alarme!\n");
+            printf("[AIGLE] Menace DETECTED ABOVE -> Alarme avant fin période\n");
             sound_alarm(sensors, ABOVE);
-        } else {
-            printf("[AIGLE] Aucune menace détectée\n");
-            // Pas de menace = temps libre, libérer la tâche de remplacement
+        } else if (sense_error == OK && result == NORMAL) {
+            printf("[AIGLE] Rien ABOVE cette période -> temps libre\n");
             sem_post(&sem_replacement);
+        } else {
+            printf("[AIGLE] Erreur sense (%d) ABOVE\n", sense_error);
         }
-        
-        // Attendre la prochaine période (EAGLE_TIME = 2000ms)
         timespec_add_ms(&next_activation, EAGLE_TIME);
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_activation, NULL);
     }
-    
     printf("[AIGLE] Arrêt de la tâche\n");
     return NULL;
 }
@@ -146,6 +145,9 @@ void* tache_aigle(void* arg) {
 
 int main(int argc, char *argv[]) {
     printf("=== Système de protection de poules ===\n");
+
+    // Initialiser RNG pour choix du renard
+    srand((unsigned)time(NULL));
     
     // Initialiser le sémaphore pour la tâche de remplacement
     if (sem_init(&sem_replacement, 0, 0) != 0) {
@@ -245,5 +247,17 @@ int main(int argc, char *argv[]) {
     
     printf("[MAIN] Programme terminé proprement.\n");
     return 0;
+}
+
+// Fonction utilitaire déplacée en bas pour compatibilité C
+const char* dir_name(side_t d) {
+    switch (d) {
+        case AWAY: return "AWAY";
+        case NORTH: return "NORTH";
+        case SOUTH: return "SOUTH";
+        case EAST: return "EAST";
+        case ABOVE: return "ABOVE";
+        default: return "UNKNOWN";
+    }
 }
 
