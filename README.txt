@@ -2,7 +2,7 @@
                     PROJET TEMPS RÉEL - PROTECTION DE POULES
 ================================================================================
 
-Auteur : [Votre nom à compléter]
+Auteur : Alan Altruy
 Cours : S-INFO-111 - Informatique Temps Réel
 
 
@@ -115,10 +115,12 @@ Le programme est structuré en trois fichiers :
    - Gestion des mutex pour la protection des sections critiques
    - Calibration automatique pour STEP_TIME précis
 
-3. main-template.c (180 lignes) :
+3. main-template.c (320 lignes) :
    - Point d'entrée du programme
-   - Création des deux threads (renard et aigle)
+   - Création des trois threads (renard, aigle, remplacement)
    - Ordonnancement off-line avec clock_nanosleep(TIMER_ABSTIME)
+   - Gestion du signal SIGINT pour arrêt propre
+   - Synchronisation par sémaphore pour la tâche de remplacement
 
 
 Contraintes respectées
@@ -132,7 +134,6 @@ Contraintes respectées
 2. CONTRAINTE DE PÉRIODICITÉ :
    Les threads utilisent clock_nanosleep() avec TIMER_ABSTIME pour
    respecter exactement les périodes FOX_TIME et EAGLE_TIME.
-   → Pas de dérive temporelle accumulée (absolute time, pas relative time)
 
 3. CONTRAINTE D'ORDONNANCEMENT PRÉEMPTIF :
    Les threads peuvent être préemptés par le système d'exploitation.
@@ -175,22 +176,68 @@ Décisions de conception importantes
 
 5. TERMINAISON DU PROGRAMME :
    Le programme se termine automatiquement via exit() (dans chickens.c)
-   lorsque toutes les poules ont été volées. Les threads tournent en
-   boucle infinie et ne se terminent jamais naturellement.
+   lorsque toutes les poules ont été volées, ou proprement lors de SIGINT (Ctrl+C).
+   Les threads vérifient le flag should_stop et se terminent proprement.
 
 
-Section 3.1 - Tâche optionnelle de remplacement (NON IMPLÉMENTÉE)
--------------------------------------------------------------------
+Section 3.1 - Tâche de remplacement des poules
+-------------------------------------------------------------
 
-La section 3.1 de l'énoncé propose une extension optionnelle avec une
-troisième tâche pour remplacer les poules volées.
+La section 3.1 de l'énoncé demande une troisième tâche pour remplacer les 
+poules volées, se comportant comme un gestionnaire d'interruption différé.
 
-Cette fonctionnalité n'a PAS été implémentée dans ce projet.
+Cette fonctionnalité a été IMPLÉMENTÉE dans ce projet.
 
-Principe (si on devait l'implémenter) :
-• Un sémaphore serait utilisé pour signaler les poules volées
-• Une tâche "handler différé" attendrait sur ce sémaphore
-• Quand une poule est volée, le handler ajouterait une nouvelle poule
+Implémentation :
+• Un sémaphore (sem_t sem_replacement) est utilisé pour synchroniser la tâche
+• La tâche reste bloquée sur sem_wait() la plupart du temps (pas de CPU utilisé)
+• Les tâches renard et aigle font sem_post() quand aucune menace n'est détectée
+• Cela libère la tâche de remplacement qui vérifie le nombre de poules
+• Si chickens_count < INIT_CHICKENS, elle ajoute une poule avec add_chicken()
+
+Stratégie de déclenchement :
+• Tâche Renard : si aucune menace détectée dans les 3 directions → sem_post()
+• Tâche Aigle : si aucune menace détectée en ABOVE → sem_post()
+• Cela garantit que la tâche de remplacement s'exécute pendant le temps CPU libre
+
+Fonctions utilisées (thread-safe) :
+• get_chickens(c, &chickens_count) : obtenir le nombre de poules
+• add_chicken(c) : ajouter une poule au poulailler
+• Durée d'exécution : négligeable (< STEP_TIME) comme spécifié dans l'énoncé
+
+Remarque importante :
+Si l'implémentation est correcte, cette tâche ne devrait jamais avoir besoin 
+de remplacer les poules perdues car les menaces sont chassées à temps.
+
+
+Section 3.2 - Gestion du signal SIGINT (IMPLÉMENTÉE)
+-----------------------------------------------------
+
+La section 3.2 de l'énoncé demande une gestion propre du signal SIGINT (Ctrl+C).
+
+Cette fonctionnalité a été IMPLÉMENTÉE dans ce projet.
+
+Implémentation :
+• Installation d'un gestionnaire de signal avec sigaction(SIGINT, &sa, NULL)
+• Handler sigint_handler() qui met should_stop = 1
+• Flag volatile sig_atomic_t should_stop vérifié dans les boucles des 3 threads
+• Le handler libère aussi le sémaphore avec sem_post() pour débloquer la tâche
+
+Arrêt propre :
+1. Réception de SIGINT (Ctrl+C)
+2. should_stop = 1 → les threads sortent de leurs boucles while
+3. pthread_join() attend la terminaison propre de tous les threads
+4. Nettoyage complet des ressources :
+   - stop_hunt(sensors) : arrête les timers du renard et de l'aigle
+   - free_sensors(sensors) : libère la structure des capteurs
+   - free_coop(c) : libère le poulailler
+   - sem_destroy(&sem_replacement) : détruit le sémaphore
+5. Message de confirmation : "Programme terminé proprement"
+
+Avantages :
+• Pas de fuite mémoire
+• Pas de threads zombies
+• Arrêt immédiat et propre de toutes les ressources système
 
 
 ================================================================================
@@ -216,7 +263,9 @@ Exécution
 Le programme affiche :
 • Le nombre initial de poules (5 par défaut)
 • Les détections de menaces et les alarmes en temps réel
+• Les remplacements de poules (si activés)
 • Se termine automatiquement quand toutes les poules sont volées
+• Ou proprement avec Ctrl+C (SIGINT)
 
 
 Test et vérification
@@ -229,8 +278,10 @@ Pour tester l'ordonnancement sur 10 secondes :
 Observations attendues :
 • Tâche Renard : s'active toutes les 4 secondes (t=0s, 4s, 8s, ...)
 • Tâche Aigle : s'active toutes les 2 secondes (t=0s, 2s, 4s, 6s, 8s, ...)
-• Les deux tâches ne se bloquent jamais mutuellement
+• Tâche Remplacement : s'active quand aucune menace n'est détectée
+• Les trois tâches ne se bloquent jamais mutuellement
 • Le programme respecte strictement les contraintes temporelles
+• Ctrl+C arrête proprement toutes les tâches et libère les ressources
 
 
 ================================================================================
@@ -270,25 +321,3 @@ Le code vérifie systématiquement les valeurs de retour :
 • sound_alarm() → valeur de retour vérifiable (non utilisée ici)
 
 Les mutex dans chickens.c garantissent l'absence de race conditions.
-
-
-Points d'amélioration possibles
----------------------------------
-
-1. Ordonnancement avec priorités explicites :
-   Utiliser pthread_setschedparam() pour définir des priorités temps-réel
-   (SCHED_FIFO ou SCHED_RR) au lieu de laisser l'ordonnanceur Linux décider.
-
-2. Monitoring du temps d'exécution réel :
-   Mesurer avec clock_gettime() si les WCET sont respectés en pratique.
-
-3. Implémentation de la section 3.1 :
-   Ajouter la tâche de remplacement des poules avec sémaphores.
-
-4. Gestion de la surcharge :
-   Détecter si une période est ratée (missed deadline) et signaler l'erreur.
-
-
-================================================================================
-FIN DU RAPPORT
-================================================================================

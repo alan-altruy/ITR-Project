@@ -1,24 +1,3 @@
-/**
- * @file main-template.c
- * @brief Système de protection automatique de poules contre le renard et l'aigle
- * 
- * Ce programme implémente un ordonnancement temps-réel off-line avec deux tâches :
- * - Tâche Renard : détecte et chasse le renard (période FOX_TIME = 4000ms)
- * - Tâche Aigle : détecte et chasse l'aigle (période EAGLE_TIME = 2000ms)
- * 
- * Ordonnancement :
- * - Unité de temps : STEP_TIME = 500ms
- * - Période Renard : 8 unités (4000ms)
- * - Période Aigle : 4 unités (2000ms)
- * - WCET Renard : 4 unités (pire cas : tester 3 directions + alarme)
- * - WCET Aigle : 2 unités (pire cas : tester 1 direction + alarme)
- * 
- * Contraintes respectées :
- * - Mono-processeur (mutex dans sense/sound_alarm)
- * - Ordonnancement préemptif (découpage des tâches)
- * - Respect des périodes avec clock_nanosleep TIMER_ABSTIME
- */
-
 #define _POSIX_C_SOURCE 200809L
 
 #include "chickens.h"
@@ -26,16 +5,29 @@
 #include <pthread.h>
 #include <time.h>
 #include <stdbool.h>
+#include <signal.h>
+#include <semaphore.h>
 
 // Variables globales
 coop_t *c;
 sensors_t *sensors;
 
-/**
- * @brief Ajoute un délai à un temps donné
- * @param ts Pointeur vers la structure timespec à modifier
- * @param ms Délai en millisecondes à ajouter
- */
+// Sémaphore pour la tâche de remplacement (gestionnaire différé)
+sem_t sem_replacement;
+
+// Flag pour arrêter proprement les threads lors de SIGINT
+volatile sig_atomic_t should_stop = 0;
+
+// Gestionnaire SIGINT : arrête proprement et débloque le sémaphore.
+void sigint_handler(int signum) {
+    printf("\n[SIGNAL] Réception de SIGINT, arrêt en cours...\n");
+    should_stop = 1;
+    
+    // Libérer le sémaphore pour débloquer la tâche de remplacement
+    sem_post(&sem_replacement);
+}
+
+// Ajoute `ms` millisecondes au `timespec` fourni.
 void timespec_add_ms(struct timespec *ts, unsigned long ms) {
     ts->tv_sec += ms / 1000;
     ts->tv_nsec += (ms % 1000) * 1000000;
@@ -47,20 +39,38 @@ void timespec_add_ms(struct timespec *ts, unsigned long ms) {
     }
 }
 
-/**
- * @brief Tâche de détection et chasse du renard
- * @param arg Non utilisé
- * @return NULL
- * 
- * Période : FOX_TIME = 4000ms (8 unités de temps)
- * WCET : 4 unités (4 × STEP_TIME = 2000ms dans le pire cas)
- * 
- * Pire cas : 
- * - Tester NORTH (500ms)
- * - Tester SOUTH (500ms) 
- * - Tester EAST (500ms)
- * - Déclencher alarme (500ms)
- */
+// Tâche de remplacement : débloquée par sémaphore pour restaurer les poules perdues.
+void* tache_remplacement(void* arg) {
+    while (1) {
+        // Attendre d'être libéré par une autre tâche
+        sem_wait(&sem_replacement);
+        
+        // Vérifier si on doit s'arrêter
+        if (should_stop) {
+            printf("[REMPLACEMENT] Arrêt de la tâche\n");
+            break;
+        }
+        
+        // Vérifier combien de poules restent
+        int chickens_count;
+        error_t res = get_chickens(c, &chickens_count);
+        
+        if (res == OK && chickens_count < INIT_CHICKENS) {
+            // Il manque des poules, en ajouter une
+            res = add_chicken(c);
+            if (res == OK) {
+                printf("[REMPLACEMENT] Poule ajoutée! Total: %d/%d\n", 
+                       chickens_count + 1, INIT_CHICKENS);
+            } else {
+                fprintf(stderr, "[REMPLACEMENT] Erreur lors de l'ajout d'une poule\n");
+            }
+        }
+    }
+    
+    return NULL;
+}
+
+// Tâche renard : patrouille périodique et déclenche l'alarme si menace détectée.
 void* tache_renard(void* arg) {
     struct timespec next_activation;
     clock_gettime(CLOCK_MONOTONIC, &next_activation);
@@ -69,17 +79,28 @@ void* tache_renard(void* arg) {
     side_t directions_renard[] = {NORTH, SOUTH, EAST};
     int nb_directions = 3;
     
-    while (1) {
+    while (!should_stop) {
+        printf("[RENARD] Patrouille démarrée\n");
+        
         // Parcourir toutes les directions du renard
+        bool menace_trouvee = false;
         for (int i = 0; i < nb_directions; i++) {
             error_t sense_error;
             sense_t result = sense(sensors, directions_renard[i], &sense_error);
             
             if (sense_error == OK && result == DETECTED) {
                 // Menace détectée, déclencher l'alarme
+                printf("[RENARD] Menace détectée à la direction %d! Alarme!\n", directions_renard[i]);
                 sound_alarm(sensors, directions_renard[i]);
+                menace_trouvee = true;
                 break; // Menace trouvée et chassée, fin de cette période
             }
+        }
+        
+        if (!menace_trouvee) {
+            printf("[RENARD] Aucune menace détectée\n");
+            // Pas de menace = temps libre, libérer la tâche de remplacement
+            sem_post(&sem_replacement);
         }
         
         // Attendre la prochaine période (FOX_TIME = 4000ms)
@@ -87,33 +108,30 @@ void* tache_renard(void* arg) {
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_activation, NULL);
     }
     
+    printf("[RENARD] Arrêt de la tâche\n");
     return NULL;
 }
 
-/**
- * @brief Tâche de détection et chasse de l'aigle
- * @param arg Non utilisé
- * @return NULL
- * 
- * Période : EAGLE_TIME = 2000ms (4 unités de temps)
- * WCET : 2 unités (2 × STEP_TIME = 1000ms dans le pire cas)
- * 
- * Pire cas :
- * - Tester ABOVE (500ms)
- * - Déclencher alarme (500ms)
- */
+// Tâche aigle : patrouille périodique et déclenche l'alarme si menace détectée.
 void* tache_aigle(void* arg) {
     struct timespec next_activation;
     clock_gettime(CLOCK_MONOTONIC, &next_activation);
     
-    while (1) {
+    while (!should_stop) {
+        printf("[AIGLE] Patrouille démarrée\n");
+        
         // Tester la direction de l'aigle (ABOVE uniquement)
         error_t sense_error;
         sense_t result = sense(sensors, ABOVE, &sense_error);
         
         if (sense_error == OK && result == DETECTED) {
             // Menace détectée, déclencher l'alarme
+            printf("[AIGLE] Menace détectée en haut! Alarme!\n");
             sound_alarm(sensors, ABOVE);
+        } else {
+            printf("[AIGLE] Aucune menace détectée\n");
+            // Pas de menace = temps libre, libérer la tâche de remplacement
+            sem_post(&sem_replacement);
         }
         
         // Attendre la prochaine période (EAGLE_TIME = 2000ms)
@@ -121,23 +139,36 @@ void* tache_aigle(void* arg) {
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_activation, NULL);
     }
     
+    printf("[AIGLE] Arrêt de la tâche\n");
     return NULL;
 }
 
-/**
- * @brief Point d'entrée du programme
- * 
- * Initialise le système, crée les deux threads (renard et aigle),
- * et attend leur terminaison (qui n'arrivera jamais en temps normal).
- * Le programme se termine automatiquement si toutes les poules sont volées.
- */
+
 int main(int argc, char *argv[]) {
     printf("=== Système de protection de poules ===\n");
+    
+    // Initialiser le sémaphore pour la tâche de remplacement
+    if (sem_init(&sem_replacement, 0, 0) != 0) {
+        fprintf(stderr, "Erreur lors de l'initialisation du sémaphore\n");
+        return 1;
+    }
+    
+    // Installer le gestionnaire de signal SIGINT
+    struct sigaction sa;
+    sa.sa_handler = sigint_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if (sigaction(SIGINT, &sa, NULL) != 0) {
+        fprintf(stderr, "Erreur lors de l'installation du gestionnaire SIGINT\n");
+        sem_destroy(&sem_replacement);
+        return 1;
+    }
     
     // Initialisation du poulailler et des capteurs
     error_t res = init_coop(&c);
     if (res != OK) {
         fprintf(stderr, "Erreur lors de l'initialisation du poulailler\n");
+        sem_destroy(&sem_replacement);
         return 1;
     }
     
@@ -145,6 +176,7 @@ int main(int argc, char *argv[]) {
     if (res != OK) {
         fprintf(stderr, "Erreur lors de l'initialisation des capteurs\n");
         free_coop(c);
+        sem_destroy(&sem_replacement);
         return 1;
     }
     
@@ -158,37 +190,60 @@ int main(int argc, char *argv[]) {
         printf("Démarrage avec %d poules\n", chickens);
     }
     
-    printf("Lancement des tâches de protection...\n\n");
+    printf("Lancement des tâches de protection...\n");
+    printf("Appuyez sur Ctrl+C pour arrêter proprement le programme.\n\n");
     
-    // Création des threads pour les deux tâches
-    pthread_t thread_renard, thread_aigle;
+    // Création des threads pour les trois tâches
+    pthread_t thread_renard, thread_aigle, thread_remplacement;
     
-    if (pthread_create(&thread_renard, NULL, tache_renard, NULL) != 0) {
-        fprintf(stderr, "Erreur lors de la création du thread renard\n");
+    if (pthread_create(&thread_remplacement, NULL, tache_remplacement, NULL) != 0) {
+        fprintf(stderr, "Erreur lors de la création du thread de remplacement\n");
         stop_hunt(sensors);
         free_sensors(sensors);
         free_coop(c);
+        sem_destroy(&sem_replacement);
+        return 1;
+    }
+    
+    if (pthread_create(&thread_renard, NULL, tache_renard, NULL) != 0) {
+        fprintf(stderr, "Erreur lors de la création du thread renard\n");
+        should_stop = 1;
+        sem_post(&sem_replacement);
+        pthread_join(thread_remplacement, NULL);
+        stop_hunt(sensors);
+        free_sensors(sensors);
+        free_coop(c);
+        sem_destroy(&sem_replacement);
         return 1;
     }
     
     if (pthread_create(&thread_aigle, NULL, tache_aigle, NULL) != 0) {
         fprintf(stderr, "Erreur lors de la création du thread aigle\n");
+        should_stop = 1;
         pthread_cancel(thread_renard);
+        sem_post(&sem_replacement);
+        pthread_join(thread_renard, NULL);
+        pthread_join(thread_remplacement, NULL);
         stop_hunt(sensors);
         free_sensors(sensors);
         free_coop(c);
+        sem_destroy(&sem_replacement);
         return 1;
     }
     
-    // Attendre la fin des threads (ne devrait jamais arriver)
-    // Le programme se termine automatiquement via exit() si toutes les poules sont volées
+    // Attendre la fin des threads (lors de SIGINT ou fin du jeu)
     pthread_join(thread_renard, NULL);
     pthread_join(thread_aigle, NULL);
+    pthread_join(thread_remplacement, NULL);
     
-    // Nettoyage (code jamais atteint en pratique)
+    // Nettoyage des ressources
+    printf("\n[MAIN] Nettoyage des ressources...\n");
     stop_hunt(sensors);
     free_sensors(sensors);
     free_coop(c);
+    sem_destroy(&sem_replacement);
     
+    printf("[MAIN] Programme terminé proprement.\n");
     return 0;
 }
+
