@@ -1,9 +1,9 @@
 <p>
-    <img src="./resources/umons.png" width="150" alt="UMONS Logo">
+    <img src="./rsc/umons.png" width="150" alt="UMONS Logo">
         &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-    <img src="./resources/umons-fs.png" width="120" alt="UMONS FS Logo">
+    <img src="./rsc/umons-fs.png" width="120" alt="UMONS FS Logo">
         &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-    <img src="./resources/polytech.png" width="180" alt="Polytech Logo">
+    <img src="./rsc/polytech.png" width="180" alt="Polytech Logo">
 </p>
 
 # ITR Project – Automated Chicken Protection System

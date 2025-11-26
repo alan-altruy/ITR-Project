@@ -1,0 +1,3 @@
+Pour compiler l'exemple:
+
+gcc -o chickens main-template.c chickens.c
